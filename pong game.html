@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Stephenson Millwork — Pong</title>
+<style>
+  :root{--bg:#0b0b12;--fg:#e7f2ff;--accent:#5ee0ff;--muted:#3a3a52}
+  html,body{height:100%;margin:0;background:radial-gradient(1200px 600px at 50% -10%,#121227,#0b0b12);color:var(--fg);font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif}
+  .wrap{display:grid;grid-template-rows:auto 1fr auto;min-height:100%}
+  header{display:flex;align-items:center;gap:.8rem;justify-content:center;padding:12px 16px;border-bottom:1px solid #17172c;background:linear-gradient(#0e0e1c,#0b0b12)}
+  header h1{font-size:clamp(16px,2.6vw,24px);margin:0;font-weight:700;letter-spacing:.3px}
+  header .pill{font-size:.9rem;opacity:.9;border:1px solid #242447;border-radius:999px;padding:4px 10px}
+  main{display:grid;place-items:center;padding:16px}
+  canvas{background:#000;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,.45), inset 0 0 0 1px #1b1b2e;max-width:min(96vw,1100px);width:100%;height:auto;image-rendering:pixelated}
+  .hud{position:relative;width:100%;max-width:min(96vw,1100px)}
+  .overlay{position:absolute;inset:0;display:grid;place-items:center}
+  .card{backdrop-filter:blur(8px);background:rgba(15,17,35,.7);border:1px solid #242447;padding:18px 18px;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:10px}
+  button{border:1px solid #2b2b4a;background:#14162b;color:var(--fg);padding:10px 14px;border-radius:12px;font-weight:600;cursor:pointer}
+  button:hover{border-color:#3a3a66}
+  .kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#11122a;border:1px solid #2a2a44;border-radius:8px;padding:2px 6px;margin:0 2px}
+  footer{opacity:.75;font-size:.9rem;text-align:center;padding:12px}
+
+  /* Touch controls */
+  .touch{position:absolute;inset:0;display:none}
+  .touch > div{position:absolute;inset:0}
+  .touch .left{left:0;right:50%}
+  .touch .right{left:50%;right:0}
+  .touch .btn{position:absolute;left:8px;right:8px;height:42%;border-radius:12px;border:1px dashed #242447}
+  .touch .up{top:8px}
+  .touch .down{bottom:8px}
+  @media (pointer:none), (pointer:coarse){ .touch{display:block} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🎮 StephensPong Millwork 🎮</h1>
+    <span class="pill">Stephenson Millwork</span>
+  </header>
+  <main>
+    <div class="hud">
+      <canvas id="game"></canvas>
+      <div id="overlay" class="overlay">
+        <div class="card">
+          <div style="text-align:center">
+            <h2 style="margin:.2rem 0 0">Press <span class="kbd">Space</span> to Start</h2>
+            <p style="margin:.4rem 0 0;opacity:.9">Pause: <span class="kbd">Space</span> · Reset: <span class="kbd">R</span> · Toggle 1P/2P: <span class="kbd">T</span></p>
+            <p style="margin:.4rem 0 0;opacity:.85">Left (AI in 1P mode): <span class="kbd">W</span>/<span class="kbd">S</span> · Right (Player in 1P mode): <span class="kbd">↑</span>/<span class="kbd">↓</span></p>
+            <div class="row">
+              <button id="startBtn">Start</button>
+              <button id="toggleBtn">1 Player</button>
+              <button id="resetBtn">Reset</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- touch controls (only show on touch devices) -->
+      <div class="touch" aria-hidden="true">
+        <div class="left">
+          <div class="btn up"   data-touch="LUP"></div>
+          <div class="btn down" data-touch="LDN"></div>
+        </div>
+        <div class="right">
+          <div class="btn up"   data-touch="RUP"></div>
+          <div class="btn down" data-touch="RDN"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <footer></footer>
+</div>
+
+<script>
+(() => {
+  // === Base canvas at your background size ===
+  const BASE_W = 960, BASE_H = 540;
+
+  // === Image assets ===
+  const IMG = {
+    bg: new Image(),
+    window: new Image(),
+    door: new Image(),
+    gear: new Image()
+  };
+  IMG.bg.src = 'background.png';
+  IMG.window.src = 'window.png';
+  IMG.door.src = 'door.png';
+  IMG.gear.src = 'gear.png';
+
+  // Paddle/ball visual sizes (feel free to tweak)
+  const PADDLE_TARGET_H = 260;         // drawn height for paddles
+  const PADDLE_ASPECT = 153/512;       // from your files (width/height)
+  const PADDLE_TARGET_W = Math.round(PADDLE_TARGET_H * PADDLE_ASPECT); // ~77-78px
+
+  const BALL_DIAM = 40;                 // drawn size for gear.png
+  const BALL_R = BALL_DIAM / 2;
+
+  // Hitbox insets to ignore transparent margins on the PNGs (pixels in DRAWN space)
+  const HITBOX_INSET = { left: 20, right: 20, top: 8, bottom: 8 };
+
+  const cvs = document.getElementById('game');
+  const ctx = cvs.getContext('2d');
+  const DPR = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+
+  function resize(){
+    const maxW = Math.min(window.innerWidth * 0.96, 1100);
+    const w = maxW, h = w * (BASE_H/BASE_W);
+    const cssW = Math.floor(w), cssH = Math.floor(h);
+    cvs.style.width = cssW+'px';
+    cvs.style.height = cssH+'px';
+    cvs.width = Math.floor(cssW * DPR);
+    cvs.height = Math.floor(cssH * DPR);
+    scaleX = cvs.width/BASE_W; scaleY = cvs.height/BASE_H;
+  }
+  let scaleX = 1, scaleY = 1; resize(); window.addEventListener('resize', resize);
+
+  const state = {
+    running:false, paused:true, singlePlayer:true,
+    scoreL:0, scoreR:0,
+    paddles: {
+      w: PADDLE_TARGET_W,
+      h: PADDLE_TARGET_H,
+      speed: 380,
+      L: { x: 32,  y: BASE_H/2 - PADDLE_TARGET_H/2, vy:0 },
+      R: { x: BASE_W-32-PADDLE_TARGET_W, y: BASE_H/2 - PADDLE_TARGET_H/2, vy:0 }
+    },
+    ball: { x: BASE_W/2, y: BASE_H/2, r: BALL_R, vx: 280, vy: 140, speedInc: 1.5, maxSpeed: 920 },
+  };
+
+  const keys = new Set();
+  addEventListener('keydown',e=>{
+    if(['KeyW','KeyS','ArrowUp','ArrowDown','Space','KeyR','KeyT'].includes(e.code)) e.preventDefault();
+    keys.add(e.code);
+    if(e.code==='Space'){ togglePause(); }
+    if(e.code==='KeyR'){ reset(true); }
+    if(e.code==='KeyT'){ state.singlePlayer = !state.singlePlayer; updateOverlay(); }
+  });
+  addEventListener('keyup',e=>keys.delete(e.code));
+
+  const touches = {LUP:false, LDN:false, RUP:false, RDN:false};
+  document.querySelectorAll('[data-touch]').forEach(el=>{
+    const key = el.getAttribute('data-touch');
+    const set = (v)=>{touches[key]=v;};
+    ['pointerdown','pointerenter'].forEach(ev=> el.addEventListener(ev, e=>{ if(e.pressure!==0||e.buttons){ set(true); } }));
+    ['pointerup','pointerleave','pointercancel','pointerout'].forEach(ev=> el.addEventListener(ev, ()=> set(false)));
+  });
+
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const toggleBtn = document.getElementById('toggleBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  startBtn.onclick = ()=>{ if(state.paused) togglePause(); };
+  resetBtn.onclick = ()=> reset(true);
+  toggleBtn.onclick = ()=>{ state.singlePlayer=!state.singlePlayer; updateOverlay(); };
+  function updateOverlay(){ toggleBtn.textContent = state.singlePlayer ? '1 Player' : '2 Players'; }
+  updateOverlay();
+
+  function togglePause(){ state.paused = !state.paused; overlay.style.display = state.paused? 'grid':'none'; if(!state.running){ state.running=true; last=performance.now(); requestAnimationFrame(loop); } }
+
+  function reset(centerBall){
+    state.scoreL = state.scoreR = 0;
+    state.paddles.L.y = state.paddles.R.y = BASE_H/2 - state.paddles.h/2;
+    if(centerBall) centerBallServe();
+  }
+  function centerBallServe(toLeft = Math.random()<0.5){
+    const angle = (Math.random()*0.6 - 0.3);
+    const speed = 320 + Math.random()*120;
+    state.ball.x = BASE_W/2; state.ball.y = BASE_H/2;
+    state.ball.vx = (toLeft?-1:1)*Math.cos(angle)*speed;
+    state.ball.vy = Math.sin(angle)*speed;
+  }
+  centerBallServe();
+
+  const AC = window.AudioContext || window.webkitAudioContext; let ac;
+  function beep(freq=600, dur=0.04){ try{ ac ||= new AC(); const o=ac.createOscillator(); const g=ac.createGain(); o.type='square'; o.frequency.value=freq; g.gain.value=0.06; o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime+dur);}catch(_){} }
+
+  let last = performance.now();
+  function loop(t){
+    if(!state.running) return;
+    const dt = Math.min(0.033, (t-last)/1000); last=t;
+    if(!state.paused){ update(dt); }
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  function update(dt){
+    const P = state.paddles, B = state.ball;
+
+    P.L.vy = 0; P.R.vy = 0;
+    if(state.singlePlayer){
+      // AI for left paddle (window)
+      const centerL = P.L.y + P.h/2;
+      const target = B.y + Math.sign(B.vy)*8;
+      const diff = target - centerL;
+      const max = P.speed * 0.9;
+      P.L.vy = Math.max(-max, Math.min(max, diff*3));
+
+      if(keys.has('ArrowUp') || touches.RUP)   P.R.vy = -P.speed;
+      if(keys.has('ArrowDown') || touches.RDN) P.R.vy =  P.speed;
+    } else {
+      if(keys.has('KeyW') || touches.LUP) P.L.vy = -P.speed;
+      if(keys.has('KeyS') || touches.LDN) P.L.vy =  P.speed;
+      if(keys.has('ArrowUp') || touches.RUP)   P.R.vy = -P.speed;
+      if(keys.has('ArrowDown') || touches.RDN) P.R.vy =  P.speed;
+    }
+
+    P.L.y += P.L.vy*dt; P.R.y += P.R.vy*dt;
+    P.L.y = Math.max(10, Math.min(BASE_H - P.h - 10, P.L.y));
+    P.R.y = Math.max(10, Math.min(BASE_H - P.h - 10, P.R.y));
+
+    B.x += B.vx*dt; B.y += B.vy*dt;
+
+    // Top/bottom walls
+    if(B.y - B.r < 6){ B.y = 6 + B.r; B.vy = Math.abs(B.vy); beep(900); }
+    if(B.y + B.r > BASE_H-6){ B.y = BASE_H-6 - B.r; B.vy = -Math.abs(B.vy); beep(900); }
+
+    // Paddle collisions using trimmed hitboxes (ignore image transparent margins)
+    function hitPaddle(p, isLeft){
+      const px = (isLeft ? P.L.x : P.R.x) + HITBOX_INSET.left;
+      const py = (isLeft ? P.L.y : P.R.y) + HITBOX_INSET.top;
+      const pw = P.w - HITBOX_INSET.left - HITBOX_INSET.right;
+      const ph = P.h - HITBOX_INSET.top - HITBOX_INSET.bottom;
+
+      if(B.x + B.r < px || B.x - B.r > px + pw || B.y + B.r < py || B.y - B.r > py + ph) return false;
+
+      const pCenter = py + ph/2;
+      const rel = ((B.y - pCenter) / (ph/2));
+      const speed = Math.min(state.ball.maxSpeed, Math.hypot(B.vx,B.vy) * state.ball.speedInc);
+      const angle = rel * 0.6; // up to ~34°
+      const dir = isLeft ? 1 : -1;
+
+      B.vx = dir * Math.cos(angle) * speed;
+      B.vy = Math.sin(angle) * speed;
+      B.x = isLeft ? (px + pw + B.r + 0.1) : (px - B.r - 0.1);
+      beep(600);
+      return true;
+    }
+    hitPaddle(P.L, true); hitPaddle(P.R, false);
+
+    // Scoring
+    if(B.x < -30){ state.scoreR++; beep(300); centerBallServe(false); state.paused=true; overlay.style.display='grid'; }
+    if(B.x > BASE_W+30){ state.scoreL++; beep(300); centerBallServe(true);  state.paused=true; overlay.style.display='grid'; }
+  }
+
+  function render(){
+    ctx.save();
+    ctx.scale(scaleX, scaleY);
+
+    // Background image (covers full field)
+    if (IMG.bg.complete && IMG.bg.naturalWidth) {
+      ctx.drawImage(IMG.bg, 0, 0, BASE_W, BASE_H);
+    } else {
+      // fallback gradient
+      const g = ctx.createLinearGradient(0,0,0,BASE_H);
+      g.addColorStop(0,'#0f1123'); g.addColorStop(1,'#0b0d1a');
+      ctx.fillStyle = g; ctx.fillRect(0,0,BASE_W,BASE_H);
+    }
+
+    // Center dashed net
+    ctx.strokeStyle = 'rgba(255,255,255,.5)';
+    ctx.setLineDash([10,14]);
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(BASE_W/2, 8); ctx.lineTo(BASE_W/2, BASE_H-8); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Score
+    ctx.fillStyle = 'rgba(255,255,255,.92)';
+    ctx.font = '48px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(state.scoreL, BASE_W*0.25, 64);
+    ctx.fillText(state.scoreR, BASE_W*0.75, 64);
+
+    const P = state.paddles, B = state.ball;
+
+    // Left paddle (window.png)
+    if (IMG.window.complete && IMG.window.naturalWidth) {
+      ctx.drawImage(IMG.window, P.L.x, P.L.y, P.w, P.h);
+    } else {
+      ctx.fillStyle = '#e7f2ff';
+      ctx.fillRect(P.L.x, P.L.y, P.w, P.h);
+    }
+
+    // Right paddle (door.png)
+    if (IMG.door.complete && IMG.door.naturalWidth) {
+      ctx.drawImage(IMG.door, P.R.x, P.R.y, P.w, P.h);
+    } else {
+      ctx.fillStyle = '#e7f2ff';
+      ctx.fillRect(P.R.x, P.R.y, P.w, P.h);
+    }
+
+    // Ball (gear.png) — B.x/B.y are the center, so offset by half size
+    const bx = B.x - BALL_R, by = B.y - BALL_R;
+    if (IMG.gear.complete && IMG.gear.naturalWidth) {
+      ctx.drawImage(IMG.gear, bx, by, BALL_DIAM, BALL_DIAM);
+    } else {
+      ctx.shadowColor = 'rgba(94,224,255,.65)';
+      ctx.shadowBlur = 18;
+      ctx.beginPath(); ctx.arc(B.x, B.y, B.r, 0, Math.PI*2); ctx.fillStyle = '#5ee0ff'; ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // Frame
+    ctx.strokeStyle = '#1b1b2e';
+    ctx.lineWidth = 4; ctx.strokeRect(6,6,BASE_W-12,BASE_H-12);
+
+    ctx.restore();
+  }
+})();
+</script>
+</body>
+</html>
